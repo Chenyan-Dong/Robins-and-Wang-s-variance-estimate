@@ -1,0 +1,399 @@
+---
+title: "X1,2 follows normal dist Y follows logistic model"
+author: "Chenyan Dong 163487177"
+date: "17/12/2021"
+output: html_document
+---
+
+```{r setup, include = FALSE, warning = FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(mvtnorm)
+library(tidyverse)
+library(bookdown)
+library(knitr)
+library(rmarkdown)
+library(matlib)
+```
+
+```{r}
+# function for p
+expit <- function(p){
+  exp(p) / (1 + exp(p))
+}
+```
+
+The simulated data set contains **2000** observations with variables `id`, `x`, `y`, `Intercept` and `imputed`.\
+`X` follows the normal distribution with $\mu = 0$ and $\sigma = 1$.\
+`Y` follows the bernoulli distribution, which is a special case of the binomial distribution where a single trial is conducted with $\mu$.\
+The $\mu$ could be calculated through the above `expit` function, which follows
+$$\textrm{logit} \, P = \textrm{log}(\frac{p}{1 - p}) = \beta_0 + \beta_1 x$$
+$$p = \frac{1}{1 + e^{\beta_0 + \beta_1 x}}$$
+We set the association between `x` and `y` should be\
+$$\textrm{logit} \, \mathbb{E}[\textrm{Y | X} = x]  = \beta_0 + \beta_1 x + \varepsilon$$
+where $\beta_0 = -1$ and $\beta_1 = 0.5$ has been set in this simulation.\
+We create the variable `Intercept` with 1 for easy to apply the $\beta_0$.\
+We randomly select the missing on `x` and replace with **NA**. Then, we create a variable `imputed` that if `x` is **NA** `imputed` would be 1, otherwise would be 0.
+
+```{r base_setup}
+# setting
+obs <- 2000
+id <- rep(1:obs)
+X1var <- 1
+X2var <- 2
+X1X2cov <- -0.25
+Yvar <- 1
+beta <- c(-1, 0.5, 0.5)
+nimpute <- 2
+
+# set seed 
+set.seed(163487177)
+
+# x follow the normal distribution with mean = 0, sd = 1
+x <- rmvnorm(obs, mean = c(0, 0), sigma = matrix(c(X1var, X1X2cov, X1X2cov, X2var), 2, 2))
+x1 <- x[, 1]
+x2 <- x[, 2]
+# we product a matrix for x 
+Xmat <- cbind(1, x1, x2)
+rownames(Xmat) <- id
+colnames(Xmat) <- c("Intercept", "x1", "x2")
+
+# y follow the bernoulli distribution 
+mu <- expit(Xmat %*% beta)
+y <- rbinom(obs, 1, mu)
+
+# original dataset
+data <- data.frame(id, x1, x2, y)
+data$Intercept <- 1
+
+# randomly sample missing on x
+miss1 <- with(data, sample(id, 0.05 * obs))
+miss2 <- with(data, sample(id, 0.05 * obs))
+miss <- unique(c(miss1, miss2))
+data[miss1, "x1"] <- NA
+data[miss, "x2"] <- NA
+data$imputed <- ifelse(data$id %in% miss, 1, 0)
+#data
+```
+
+We fit a linear regression model of `X` on `Y` is given by $X = \beta_0 + \beta_1 y + \varepsilon$ as the imputation model.
+
+```{r fitting, eval = FALSE}
+# fit linear regression model (imputation model)
+fit.impute1 <- lm(x1 ~ y, data, y = FALSE, model = FALSE)
+fit.impute2 <- lm(x2 ~ y + x1, data, y = FALSE, model = FALSE)
+```
+
+We begin to do the imputation on `x` and replace the missing on `x` with imputed values.
+
+```{r imputing, eval = FALSE}
+# set seed 
+set.seed(163487177)
+
+# impute values X1
+variables1 <- c("Intercept", "y")
+data_mat1 <- data[, variables1]
+desmatrix1 <- rmvnorm(1, mean = fit.impute1$coefficients, sigma = vcov(fit.impute1))
+linpred1 <- as.vector(desmatrix1 %*% t(data_mat1))
+
+# account for random noise X1
+resid1 <- fit.impute1$residuals
+imputed.values1 <- linpred1 + rnorm(length(linpred1), 0, sqrt(X1var))
+data.impute1 <- data
+data.impute1$x1[miss1] <- imputed.values1[miss]
+
+# impute values X2
+variables2 <- c("Intercept", "y", "x1")
+data_mat2 <- data.impute1[, variables2]
+desmatrix2 <- rmvnorm(1, mean = fit.impute2$coefficients, sigma = vcov(fit.impute2))
+linpred2 <- as.vector(desmatrix2 %*% t(data_mat2))
+
+# account for random noise X2
+resid2 <- fit.impute2$residuals
+imputed.values2 <- linpred2 + rnorm(length(linpred2), 0, sqrt(X2var))
+data.impute <- data.impute1
+data.impute$x2[miss] <- imputed.values2[miss]
+
+#data.impute
+```
+
+**Calculate the imputation model components**
+
+Two of these components $(S^{mis}, d)$ are derived from the imputation model, $f(x_i | \theta)$, where $X$ generally includes multiple variables, some of which are missing for some $i$. Here $f(x_i | \theta)$ represents a joint model for all $X$, which may be specified as a set of conditional models. Values of $(S^{mis}, d)$ are based on the score function and its derivative for the imputation model. 
+
+$$f(x, y | \theta) = f(x | y) f(y)$$
+where $f(x | y)$ could be defined as $x = \beta_0 + \beta_1 y + \varepsilon$ as the imputation model is a linear regression and $f(y)$ corresponds to the probability of $Y = 1$ and $Y = 0$. In this case, we do not need to care about the $f(y)$.\
+
+As $\varepsilon \sim N(0, \sigma_\eta^2)$ that $x - \beta_0 - \beta_1 y \sim N(0, \sigma_\eta^2)$.
+
+To evaluate the score function with the log-likelihood function that $s(\theta) = \frac{\partial \, \textrm{log} \, \mathcal{L}(\theta)}{\partial \theta}$.
+
+$$f(x | y) = \frac{1}{\sigma \sqrt{2\pi}} e^{- \frac{1}{2} (\frac{x - \beta_0 - \beta_1 y}{\sigma})^2}$$
+
+$$\textrm{log} \, f = -\frac{1}{2} \textrm{log}(\sigma^2) -\frac{1}{2} (\frac{x - \beta_0 - \beta_1 y}{\sigma})^2$$
+$$\frac{\partial \, \textrm{log} \, f}{\partial \beta_0} = - \frac{1}{\sigma^2} \beta_0 + \frac{1}{\sigma^2} (x - \beta_1 y)$$
+$$ = \frac{x - \beta_0 - \beta_1 y}{\sigma^2}$$
+$$\frac{\partial \, \textrm{log} \, f}{\partial \beta_1} = - \frac{1}{\sigma^2} \beta_1 y^2+ \frac{1}{\sigma^2} (x - \beta_0)y$$
+$$ = \frac{(x - \beta_0 - \beta_1 y)y}{\sigma^2}$$
+$$\frac{\partial \, \textrm{log} \, f}{\partial \sigma^2} = - \frac{1}{2\sigma^2} + \frac{(x - \beta_0 - \beta_1 y)^2}{2(\sigma^2)^2}$$
+
+```{r score, eval = FALSE}
+# evaluate score function X1
+imputedvar1 <- data.impute[, "x1"]
+imputemod.var1 <- c("Intercept", all.vars(formula(fit.impute1)[-2]))
+sigma.est1 <- var(fit.impute1$residuals)
+predicted.values1 <- predict(fit.impute1, newdata = data.impute)
+S_u_1.1 <- (imputedvar1 - predicted.values1) * data.impute[, imputemod.var1] / sigma.est1
+S_sigma_1.1 <- 0.5 * (-1/sigma.est1 + (imputedvar1 - predicted.values1)^2 / sigma.est1^2)
+S_u1 <- cbind(S_u_1.1, S_sigma_1.1)
+modelvarcount1 <- length(imputemod.var1) + 1
+# head(S_u1)
+
+# evaluate score function X2
+imputedvar2 <- data.impute[, "x2"]
+imputemod.var2 <- c("Intercept", all.vars(formula(fit.impute2)[-2]))
+sigma.est2 <- var(fit.impute2$residuals)
+predicted.values2 <- predict(fit.impute2, newdata = data.impute)
+S_u_1.2 <- (imputedvar2 - predicted.values2) * data.impute[, imputemod.var2] / sigma.est2
+S_sigma_1.2 <- 0.5 * (-1/sigma.est2 + (imputedvar2 - predicted.values2)^2 / sigma.est2^2)
+S_u2 <- cbind(S_u_1.2, S_sigma_1.2)
+modelvarcount2 <- length(imputemod.var2) + 1
+# head(S_u2)
+
+# summary together
+S_u <- data.frame(S_u1, S_u2)
+```
+
+Let $v_i = 1$ denote that the $i^{th}$ observation was observed and $v_i = 0$ denote that the $i^{th}$ observation was imputed. For the $k^{th}$ imputation, $S_k^{mis}$ is a $n \times p$ matrix corresponding to the score of each parameter in the imputation model evaluated for each observation that was imputed. However, if the observation was not imputed, a value of 0 is assigned.
+
+$$S_{i, k}^{mis} = [\frac{\partial \, \textrm{log} \, f(x_i | \theta)}{\partial \theta}|_{\theta = \hat{\theta}}](1 - v_i)$$
+$$S_{i, k}^{obs} = [\frac{\partial \, \textrm{log} \, f(x_i | \theta)}{\partial \theta}|_{\theta = \hat{\theta}}]v_i$$
+
+```{r s_mis, eval = FALSE}
+# matrices with indicators for whether observation corresponding to each row was missing or not
+imputedMat <- matrix((data.impute$id %in% miss), nrow(S_u), ncol(S_u), byrow = FALSE)
+observedMat <- 1 - imputedMat
+
+# calculation of S_mis
+S_mis <- S_u * imputedMat
+```
+
+For calculating the $d$, we need to evaluate the derivative of score function:
+
+$$\frac{\partial^2 \, \textrm{log} \, f}{\partial \beta_0^2} = - \frac{1}{\sigma^2}$$
+
+$$\frac{\partial^2 \, \textrm{log} \, f}{\partial \beta_1^2} = - \frac{y^2}{\sigma^2}$$
+
+$$\frac{\partial^2 \, \textrm{log} \, f}{\partial \beta_0 \, \partial \sigma^2} = - \frac{x - \beta_0 - \beta_1 y}{(\sigma^2)^2}$$
+$$\frac{\partial^2 \, \textrm{log} \, f}{\partial \beta_1 \, \partial \sigma^2} = - \frac{(x - \beta_0 - \beta_1 y)y}{(\sigma^2)^2}$$
+$$\frac{\partial^2 \, \textrm{log} \, f}{\partial (\sigma^2)^2} = \frac{1}{\sigma^2} + \frac{1}{2}(-2 \frac{x - \beta_0 - \beta_1 y}{(\sigma^2)^3})$$
+$$ = \frac{1}{\sigma^2} - \frac{x - \beta_0 - \beta_1 y}{(\sigma^2)^3}$$
+
+```{r score_der, eval = FALSE}
+# evaluate derivative of score function
+imputedvar1 <- data.impute[, "x1"]
+imputemod.var1 <- c("Intercept", all.vars(formula(fit.impute1)[-2]))
+impvar_n1 <- length(imputemod.var1)
+sigma.est1 <- var(fit.impute1$residuals)
+predicted.values1 <- predict(fit.impute1, newdata = data.impute)
+
+S2_uu1 <- matrix(NA, nrow(data.impute), length(imputemod.var1))
+S2_uu1 <- with(data.impute, 
+              (-1/sigma.est1 * t(data.impute[-miss1, imputemod.var1]) %*% 
+                 t(t(data.impute[-miss1, imputemod.var1]))))
+S2_usigma1 <- with(data.impute, 
+                  (-1/sigma.est1^2 * t(data.impute[-miss1, c(imputemod.var1)]) %*%
+                     (imputedvar1 - predicted.values1)[-miss1]))
+S2_sigmasigma1 <- sum(with(data.impute, ifelse(data.impute$imputed == 1, 0, 
+                                              1/(2*sigma.est1^2) - (imputedvar1 - predicted.values1)^2/sigma.est1^3)))
+
+S2_mod1 <- matrix(0, impvar_n1 + 1, impvar_n1 + 1)
+S2_mod1[1:impvar_n1, 1:impvar_n1] <- S2_uu1/dim(data.impute)[1]
+S2_mod1[1:impvar_n1, impvar_n1 + 1] <- S2_mod1[impvar_n1 + 1, 1:impvar_n1] <- apply(S2_usigma1, 1, mean)/dim(data.impute)[1]
+S2_mod1[impvar_n1 + 1, impvar_n1 + 1] <- S2_sigmasigma1/dim(data.impute)[1]
+#S2_mod1
+
+# evaluate derivative of score function
+imputedvar2 <- data.impute[, "x2"]
+imputemod.var2 <- c("Intercept", all.vars(formula(fit.impute2)[-2]))
+impvar_n2 <- length(imputemod.var2)
+sigma.est2 <- var(fit.impute2$residuals)
+predicted.values2 <- predict(fit.impute2, newdata = data.impute)
+
+S2_uu2 <- matrix(NA, nrow(data.impute), length(imputemod.var2))
+S2_uu2 <- with(data.impute, 
+              (-1/sigma.est2 * t(data.impute[-miss, imputemod.var2]) %*% 
+                 t(t(data.impute[-miss, imputemod.var2]))))
+S2_usigma2 <- with(data.impute, 
+                  (-1/sigma.est2^2 * t(data.impute[-miss, c(imputemod.var2)]) %*%
+                     (imputedvar2 - predicted.values2)[-miss]))
+S2_sigmasigma2 <- sum(with(data.impute, ifelse(data.impute$imputed == 1, 0, 
+                                              1/(2*sigma.est2^2) - (imputedvar2 - predicted.values2)^2/sigma.est2^3)))
+
+S2_mod2 <- matrix(0, impvar_n2 + 1, impvar_n2 + 1)
+S2_mod2[1:impvar_n2, 1:impvar_n2] <- S2_uu2/dim(data.impute)[1]
+S2_mod2[1:impvar_n2, impvar_n2 + 1] <- S2_mod2[impvar_n2 + 1, 1:impvar_n2] <- apply(S2_usigma2, 1, mean)/dim(data.impute)[1]
+S2_mod2[impvar_n2 + 1, impvar_n2 + 1] <- S2_sigmasigma2/dim(data.impute)[1]
+#S2_mod2
+```
+
+To calculate $d$, we first take derivates of the score function with respect to each parameter, evaluate at each observation that was not imputed, and take the average. We then take the inverse of this $p \times p$ matrix, multiply by the transpose of $S^{obs}$, and multiply by -1. Note that $S^{obs}$ is the score evaluated for each observation that was not imputed; imputed values are assigned a value of 0.
+
+$$d_i^T = -[\frac{1}{n} \sum^{n}_{i = 1} v_i \, \frac{\partial}{\partial \theta^T}(\frac{\partial \, \textrm{log} \, f(x_i | \theta)}{\partial \theta})|_{\theta = \hat{\theta}}]^{-1} \, {S_i^{obs}}^T$$
+
+```{r d, eval = FALSE}
+# calculation of D
+S_obs <- S_u * observedMat
+n_S2mod1 <- ncol(S2_mod1)
+n_S2mod2 <- ncol(S2_mod2)
+n_S2mod <- n_S2mod1 + n_S2mod2
+	
+S2 <- matrix(0, n_S2mod, n_S2mod)
+S2[1:n_S2mod1, 1:n_S2mod1] <- S2_mod1
+S2[(n_S2mod1 + 1):n_S2mod, (n_S2mod1 + 1):n_S2mod] <- S2_mod2
+
+Dmat <- solve(S2)
+d_t <- ((-1)*Dmat) %*% t(S_obs)
+d <- t(d_t)
+```
+
+We fit a logistic regression model of `Y` on `X` is given by $\textrm{logit} \, \mathrm{E}(\textrm{Y | X} = x)  = \beta_0 + \beta_1 x_1 + \beta_2 x_2 + \varepsilon$ as the analysis model.
+
+```{r, analysis, eval = FALSE}
+# fit logistic regression model (analysis model)
+fit.analysis <- glm(y ~ x1 + x2, data.impute, family = "binomial")
+
+# set for analysis mode and data
+analysis.predict <- predict(fit.analysis, type = "response")
+analysis.vars <- names(fit.analysis$coef)
+analysis.vars <- ifelse(analysis.vars == "(Intercept)", "Intercept", analysis.vars)
+
+# capture estimates and corresponding SE from each imputation
+# analysis.est <- fit.analysis$coef["x"]
+# analysis.se <- sqrt(diag(vcov(fit.analysis))["x"])
+```
+
+<p>&nbsp;</p>
+
+**Analysis model components**
+
+Both $(u, \tau)$ components are based on the estimating equations pertaining to the analysis model. For each imputation, we evaluate the estimating equation $u_i(\hat{\theta}, \hat{\beta}_k)$ for all subjects in the analysis dataset.
+
+$$u_i(\hat{\theta}, \hat{\beta}_k) = (y - \beta_0 - \beta_1 x)y$$
+
+```{r u, eval = FALSE}
+# calculation of u
+# evaluate the estimating equation for each observation
+U_i <- data.impute[, analysis.vars] * matrix((data.impute$y - analysis.predict), dim(data.impute[, analysis.vars]))
+U_i[is.na(U_i)] <- 0	
+```
+
+To calculate $\tau$ , we take the derivative of the estimating equation and evaluate as:
+
+$$\tau = -\frac{1}{nm} \sum_{i = 1}^n \sum_{k = 1}^m (\frac{\partial \, u(i, k)}{\partial \beta^T})$$
+
+```{r tau, eval = FALSE}
+# calculation of tau
+# take the derivative of the estimating equation and evaluate for each observation
+tempdat <- data.impute[, analysis.vars]
+#predicted.values is actually predicted LP
+analysis.predLP <- predict(fit.analysis, newdata = tempdat, type = "link")
+tau_i <- matrix(NA, ncol(tempdat), ncol(tempdat))
+rownames(tau_i) <- colnames(tau_i) <- colnames(tempdat)
+constant.term <- exp(analysis.predLP)/(1 + exp(analysis.predLP))^2
+for (matrow in 1:ncol(tempdat)){
+  for (matcol in 1:ncol(tempdat)){
+    temp <- (-1)*(tempdat[, matrow]) * ((tempdat[, matcol])) * constant.term
+    tau_i[matrow, matcol] <- (-1)*sum(temp)
+	}
+}
+```
+
+```{r imputation, warning = FALSE}
+imputation <- function(data, nimpute, obs) {
+  # initialize select variables
+  results <- replicate(800, {
+    set.seed(163487177)
+  U_i_sum <- 0
+  kappa_sum <- 0
+  tau_sum <- 0
+  analysis.est1 <- analysis.se1 <- analysis.est2 <- analysis.se2 <- NULL
+  
+  for(p in 1:nimpute){
+    <<fitting>>
+    <<imputing>>
+    <<score>>
+    <<score_der>>
+    <<s_mis>>
+    <<d>>
+    <<analysis>>
+    # capture estimates and corresponding SE from each imputation
+    analysis.est1[p] <- fit.analysis$coef["x1"]
+    analysis.est2[p] <- fit.analysis$coef["x2"]
+    analysis.se1[p] <- sqrt(diag(vcov(fit.analysis))["x1"])
+    analysis.se2[p] <- sqrt(diag(vcov(fit.analysis))["x2"])
+    <<u>>
+    <<tau>>
+    # create summations of certain components across imputations
+    U_i_sum <- U_i_sum + U_i	
+	  tau_sum <- tau_sum + tau_i
+	  # calculate kappa for a given imputation
+	  kappa <- t(U_i) %*% t(t(S_mis))
+	  # create summation for kappa across imputations
+	  kappa_sum <- kappa_sum + kappa
+  }
+  u_bar <- U_i_sum/nimpute
+	u_bar <- t(t(u_bar))
+
+	omega <- (t(u_bar) %*% t(t(u_bar)))/(obs)
+	kappa <- t(t(kappa_sum/(obs * nimpute)))
+
+	alpha <- (t(d) %*% d) / obs
+
+	delta <- omega + kappa %*% alpha %*% t(kappa) + (1/obs) * (kappa %*% t(d) %*% u_bar + t(kappa %*% t(d) %*% u_bar))
+	tau <- tau_sum/(nimpute * obs)
+	gamma <- (1/obs) * t(t(solve(tau))) %*% delta %*% t(solve(tau)) 
+	
+	#Save SE estimates to calculate CIs!
+	seRW <- sqrt(diag(gamma)[c("x1", "x2")])
+	seRR <- sqrt(c(mean(analysis.se1^2), mean(analysis.se2^2)) + (nimpute + 1)/nimpute * c(var(analysis.est1), var(analysis.est1)))
+	
+	# parameter Estimate
+	estimate1 <- mean(analysis.est1)
+	estimate2 <- mean(analysis.est2)
+	estimate <- c(estimate1, estimate2)
+	
+	c(estimate, seRW, seRR)
+  })
+  
+  estimate1 <- mean(results[1,])
+  estimate2 <- mean(results[2,])
+  seRW1 <- mean(results[3,])
+  seRW2 <- mean(results[4,])
+  seRR1 <- mean(results[5,])
+  seRR2 <- mean(results[6,])
+  
+  upperCI_RW1 <- estimate1 + 1.96 * seRW1
+  upperCI_RR1 <- estimate1 + 1.96 * seRR1
+  lowerCI_RW1 <- estimate1 - 1.96 * seRW1
+  lowerCI_RR1 <- estimate1 - 1.96 * seRR1
+  
+  upperCI_RW2 <- estimate2 + 1.96 * seRW2
+  upperCI_RR2 <- estimate2 + 1.96 * seRR2
+  lowerCI_RW2 <- estimate2 - 1.96 * seRW2
+  lowerCI_RR2 <- estimate2 - 1.96 * seRR2
+  
+  
+  output <- rbind(c(estimate1, seRW1, lowerCI_RW1, upperCI_RW1, seRR1, lowerCI_RR1, upperCI_RR1), 
+                  c(estimate2, seRW2, lowerCI_RW2, upperCI_RW2, seRR2, lowerCI_RR2, upperCI_RR2))
+	rownames(output) <- c("x1", "x2")
+	colnames(output) <- c("estimate", "seRobinsWang", "95%RWl", "95%RWu", "seRubin", "95%RRl", "95%RRu")
+	output
+}
+```
+
+
+
+```{r, warning = FALSE}
+imputation(data, nimpute, obs)
+```
+

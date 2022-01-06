@@ -1,0 +1,303 @@
+---
+title: "Function for logistic regression"
+author: "Chenyan Dong 163487177"
+date: "05/01/2022"
+output: html_document
+---
+
+```{r setup, include = FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(mvtnorm)
+library(tidyverse)
+library(bookdown)
+library(knitr)
+library(rmarkdown)
+library(matlib)
+library(skimr)
+```
+
+```{r}
+# function for p
+expit <- function(p){
+  exp(p) / (1 + exp(p))
+}
+```
+
+```{r}
+testNA <- function(data){
+  order <- order(unlist(lapply(data, function(x) {sum(is.na(x))})), decreasing = TRUE)
+  class <- unlist(lapply(data, class))[order]
+  nmiss <- unlist(lapply(data, function(x) {sum(is.na(x))}))[order]
+  pmiss <- unlist(lapply(data, function(x) {round((sum(is.na(x))/length(x)*100), digits = 1)}))[order]
+  rank <- names(na.omit(ifelse(nmiss == 0, NA, nmiss)))
+  summary <- rbind(class, nmiss, pmiss)
+  structure(list(class = class, nmiss = nmiss, pmiss = pmiss, rank = rank, summary = summary), class = "testNA")
+}
+```
+
+```{r}
+impute <- function(data, imputemod){
+  
+  data$id <- 1:nrow(data)
+  data$Intercept <- 1
+  imputemod.vars <- c("Intercept", all.vars(formula(imputemod)[-2]))
+  data_mat <- data[, imputemod.vars]
+  
+  if(imputemod$family == "binomial"){
+    desmatrix <- rmvnorm(1, mean = imputemod$coefficients, sigma = vcov(imputemod))
+    linpred <- as.vector(desmatrix %*% t(data_mat))
+    imputed.values <- rbinom(length(linpred), 1, exp(linpred)/(1 + exp(linpred)))
+    
+    imputedvar <- rownames(attributes(imputemod$terms)$factors)[1]
+    imputedvars <- impute.data[, imputedvar]
+    miss <- which(is.na(data[, imputedvar]))
+    impute.data <- data
+    impute.data[miss, imputedvar] <- imputed.values[miss]
+    impute.data$imputed <- ifelse(data$id %in% miss, 1, 0)
+    
+    predicted.values <- predict(imputemod, newdata = impute.data, returnvar = "linpred")
+    S_u <- impute.data[, imputemod.vars]*(imputedvars - exp(predicted.values)/(1 + exp(predicted.values)))
+    modvarcount <- length(imputemod.vars)
+    
+    imputeX <- impute.data[, imputemod.vars]
+    # predicted.values is actually predicted LP
+    predicted.values <- predict(imputemod, newdata = impute.data, type = "link")
+	  S2_mod <- matrix(NA, ncol(imputeX), ncol(imputeX))
+	  constant.term <- exp(predicted.values)/(1 + exp(predicted.values))^2
+	  for (matrow in 1:ncol(imputeX)){
+	    for (matcol in 1:ncol(imputeX)){
+	      temp <- (-1) * (imputeX[, matrow]) * ((imputeX[, matcol])) * constant.term
+	      temp[impute.data$Imputed == 1] <- 0
+	      S2_mod[matrow, matcol] <- sum(temp)/length(impute.data$id)
+	    }
+	  }
+	  }else{
+	  desmatrix <- rmvnorm(1, mean = imputemod$coefficients, sigma = vcov(imputemod))
+    linpred <- as.vector(desmatrix %*% t(data_mat))
+    resid <- imputemod$residuals
+    imputed.values <- linpred + as.numeric(sample(resid, length(linpred), replace = TRUE))
+	 
+    imputedvar <- rownames(attributes(imputemod$terms)$factors)[1]
+    miss <- which(is.na(data[, imputedvar]))
+    impute.data <- data
+    impute.data[miss, imputedvar] <- imputed.values[miss]
+    impute.data$imputed <- ifelse(data$id %in% miss, 1, 0)
+	    
+    imputedvars <- impute.data[, imputedvar]
+    impvar_n <- length(imputemod.vars)
+    sigma.est <- var(imputemod$residuals)
+    predicted.values <- predict(imputemod, newdata = impute.data)
+    S_u_1 <- (imputedvars - predicted.values) * impute.data[, imputemod.vars]/sigma.est
+    S_sigma_1 <- 0.5 * (-1/sigma.est + (imputedvars - predicted.values)^2/sigma.est^2)
+    S_u <- cbind(S_u_1, S_sigma_1)
+    modvarcount <- length(imputemod.vars) + 1
+    
+    S2_uu <- matrix(NA, nrow(impute.data), length(imputemod.vars))
+    S2_uu <- with(impute.data, 
+              (-1/sigma.est * t(impute.data[-miss, imputemod.vars]) %*% 
+                 t(t(impute.data[-miss, imputemod.vars]))))
+    S2_usigma <- with(impute.data,
+                    (-1/sigma.est^2 * t(impute.data[-miss, c(imputemod.vars)]) %*%
+                       (imputedvars - predicted.values)[-miss]))
+    S2_sigmasigma <- sum(with(impute.data, ifelse(impute.data$imputed == 1, 0, 
+                                                1/(2*sigma.est^2) - (imputedvars - 
+                                                                    predicted.values)^2/sigma.est^3)))
+
+    S2_mod <- matrix(0, impvar_n + 1, impvar_n + 1)
+    S2_mod[1:impvar_n, 1:impvar_n] <- S2_uu/dim(impute.data)[1]
+    S2_mod[1:impvar_n, impvar_n + 1] <- S2_mod[impvar_n + 1, 1:impvar_n] <- 
+    apply(S2_usigma, 1, mean)/dim(impute.data)[1]
+    S2_mod[impvar_n + 1, impvar_n + 1] <- S2_sigmasigma/dim(impute.data)[1]
+  }
+  
+  structure(list(impute.data = impute.data, impute.mod = imputemod, imputedvar = imputedvar, 
+                 miss = miss, S_u = S_u, S2_mod = S2_mod, orig.data = data), class = "impute")
+}
+```
+
+```{r}
+impute.var <- function(data, impute.data, imputemod, analysismod, nimputvar, nimpute = 25){
+  results <- replicate(800, {
+    set.seed(163487177)
+    U_i_sum <- 0
+    kappa_sum <- 0
+    tau_sum <- 0
+    analysis.est <- analysis.se <- matrix(0, nrow = nimpute, 
+                                          ncol = length(names(analysismod$coef)[-1]), byrow = T)
+    
+    for(p in 1:nimpute){
+      
+      if(nimputvar > 1){
+      imputed  <- NULL
+      n_imputemod <- length(lengths(imputemod))
+      
+      
+      for(j in 1:n_imputemod){
+        if(j == 1){
+          imputed[[j]] <- impute(data, imputemod[[j]])
+          } else{
+            imputed[[j]] <- impute(imputed[[j - 1]]$impute.data, imputemod[[j]])
+          }
+        }
+      
+      S_u <- NULL
+      n_S2mod <- NULL
+      S2_mod <- NULL
+      
+      for(i in 1:length(imputed)){
+        S_u[[i]] <- data.frame(imputed[[i]]$S_u)
+        n_S2mod[[i]] <- ncol(imputed[[i]]$S2_mod)
+        S2_mod[[i]] <- imputed[[i]]$S2_mod
+        miss <- imputed[[i]]$miss
+        }
+      
+      S_u <- data.frame(S_u)
+      n.S2mod <- unlist(n_S2mod)
+      n_S2mod <- sum(n.S2mod)
+      S2 <- matrix(0, n_S2mod, n_S2mod)
+      
+      for(i in 1:length(n.S2mod)){
+        if(i == 1){
+          S2[1:n.S2mod[i], 1:n.S2mod[i]] <- S2_mod[[i]]
+          } else if(i == length(n.S2mod)){
+            S2[(n_S2mod - n.S2mod[i] + 1):n_S2mod, (n_S2mod - n.S2mod[i] + 1):n_S2mod] <- S2_mod[[i]]
+            } else{
+              S2[(sum(n.S2mod[1:i-1]) + 1):(sum(n.S2mod[1:i-1]) + 1 + n.S2mod[i]), 
+                 (sum(n.S2mod[1:i-1]) + 1):(sum(n.S2mod[1:i-1]) + 1 + n.S2mod[i])] <- S2_mod[[i]]
+            }
+        }
+      }else{
+        imputed <- impute(data, imputemod)
+        miss <- imputed$miss
+        S_u <- imputed$S_u
+        S2_mod <- imputed$S2_mod
+        S2 <- S2_mod
+      }
+      
+      # matrices with indicators for whether observation corresponding to each row was missing or not
+      imputedMat <- matrix((impute.data$id %in% miss), nrow(S_u), ncol(S_u), byrow = FALSE)
+      observedMat <- 1 - imputedMat
+      
+      # calculation of S_mis & S_obs
+      S_mis <- S_u * imputedMat
+      S_obs <- S_u * observedMat
+      
+      # calculation of D
+      if(analysismod$family == "binomial"){
+        Dmat <- solve(S2)
+      }else{
+        Dmat <- inv(S2)
+      }
+      d_t <- ((-1)*Dmat) %*% t(S_obs)
+      d <- t(d_t)
+      
+      # analysis model
+      analysis.predict <- predict(analysismod, type = "response")
+      analysis.vars <- names(analysismod$coef)
+      analysis.vars <- ifelse(analysis.vars == "(Intercept)", "Intercept", analysis.vars)
+      analysis.y <- rownames(attributes(analysismod$terms)$factors)[1]
+      analysis.family <- analysismod$family[1]
+      
+      # capture estimates and corresponding SE from each imputation
+      for(k in 1:length(analysis.vars[-1])){
+        analysis.est[p, k] <- analysismod$coef[analysis.vars[-1]][k]
+        analysis.se[p, k] <- sqrt(diag(vcov(analysismod)))[analysis.vars[-1]][k]
+        }
+      
+      # Analysis model components
+      U_imp <- impute.data[, analysis.vars] * matrix((impute.data[, analysis.y] - analysis.predict), 
+                                                     dim(impute.data[, analysis.vars]))
+      a <- cbind(impute.data$id, U_imp)
+      colnames(a) <- c("id",colnames(U_imp))
+      b <- merge(impute.data[,c("id","imputed")], a, by = "id", all = T)
+      U_i <- b[, colnames(U_imp)]
+      U_i[is.na(U_imp)] <- 0	
+      
+      # calculation of tau
+      tempdat <- impute.data[, analysis.vars]
+      # predicted.values is actually predicted LP
+      if(analysismod$family == "binomial"){
+        analysis.predLP <- predict(analysismod, newdata = tempdat, type = "link")
+        tau_i <- matrix(NA, ncol(tempdat), ncol(tempdat))
+        rownames(tau_i) <- colnames(tau_i) <- colnames(tempdat)
+        constant.term <- exp(analysis.predLP)/(1 + exp(analysis.predLP))^2
+      }else{
+        analysis.predLP <- predict(analysismod, newdata = tempdat)
+        tau_i <- matrix(NA, ncol(tempdat), ncol(tempdat))
+        rownames(tau_i) <- colnames(tau_i) <- colnames(tempdat)
+        constant.term <- 1
+      }
+      for (matrow in 1:ncol(tempdat)){
+        for (matcol in 1:ncol(tempdat)){
+          temp <- (-1)*(tempdat[, matrow]) * ((tempdat[, matcol])) * constant.term
+          tau_i[matrow, matcol] <- (-1)*sum(temp)
+        }
+      }
+      
+      # create summations of certain components across imputations
+      U_i_sum <- U_i_sum + U_i	
+	    tau_sum <- tau_sum + tau_i
+	    # calculate kappa for a given imputation
+	    kappa <- t(U_i) %*% t(t(S_mis))
+	    # create summation for kappa across imputations
+	    kappa_sum <- kappa_sum + kappa
+    }
+    obs <- nrow(impute.data)
+    
+    u_bar <- U_i_sum/nimpute
+    u_bar <- t(t(u_bar))
+
+    omega <- (t(u_bar) %*% t(t(u_bar)))/(obs)
+    kappa <- t(t(kappa_sum/(obs * nimpute)))
+
+    alpha <- (t(d) %*% d) / obs
+
+    delta <- omega + kappa %*% alpha %*% t(kappa) + (1/obs) * (kappa %*% t(d) %*% u_bar + t(kappa %*% t(d) %*% u_bar))
+    tau <- tau_sum/(nimpute * obs)
+	  gamma <- (1/obs) * t(t(solve(tau))) %*% delta %*% t(solve(tau)) 
+	
+	  # se and parameter estimate
+	  seRW <- sqrt(diag(gamma)[analysis.vars[-1]])
+	  if(nimputvar > 1){
+	    seRR <- sqrt(colMeans(analysis.se^2) + (nimpute + 1)/nimpute * var(analysis.est))[, 1] %>% as.vector()
+	    estimate <- colMeans(analysis.est)
+	    }else{
+	      seRR <- sqrt(mean(analysis.se^2) + (nimpute + 1)/nimpute * var(analysis.est))
+	      estimate <- mean(analysis.est)
+	    }
+	  
+	  c(estimate, seRW, seRR)
+	  })
+  
+  num <- length(names(analysismod$coef)[-1])
+  
+  if(nimputvar > 1){
+    estimate <- rowMeans(results[1:num,])
+    seRW <- rowMeans(results[(num + 1):(num + num),])
+    seRR <- rowMeans(results[(num + num + 1):(num + num + num),])
+    }else{
+      estimate <- mean(results[1:num,])
+      seRW <- mean(results[(num + 1):(num + num),])
+      seRR <- mean(results[(num + num + 1):(num + num + num),])
+    }
+  if(analysismod$family == "binomial"){
+    upperCI_RW <- exp(estimate + 1.96 * seRW)
+    upperCI_RR <- exp(estimate + 1.96 * seRR)
+    lowerCI_RW <- exp(estimate - 1.96 * seRW)
+    lowerCI_RR <- exp(estimate - 1.96 * seRR)
+    estimate <- exp(estimate)
+  }else{
+    upperCI_RW <- estimate + 1.96 * seRW
+    upperCI_RR <- estimate + 1.96 * seRR
+    lowerCI_RW <- estimate - 1.96 * seRW
+    lowerCI_RR <- estimate - 1.96 * seRR
+  }
+  
+  output <- matrix(c(estimate, seRW, lowerCI_RW, upperCI_RW, seRR, lowerCI_RR, upperCI_RR), nrow = num)
+  rownames(output) <- names(analysismod$coef)[-1]
+  colnames(output) <- c("estimate", "seRobinsWang", "95%lCI_RW", "95%uCI_RW", "seRubin", "95%lCI_RR", "95%uCI_RR")
+  
+  structure(list(output = output, analysis.summary = summary(analysismod)), class = "impute.var")
+}
+```
+
