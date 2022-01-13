@@ -1,0 +1,313 @@
+---
+title: "Simulate 1"
+author: "Chenyan Dong 163487177"
+date: "07/01/2022"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+
+library(mvtnorm)
+library(tidyverse)
+library(bookdown)
+library(knitr)
+library(rmarkdown)
+library(matlib)
+library(skimr)
+```
+
+```{r}
+# function for p
+expit <- function(p){
+  exp(p) / (1 + exp(p))
+}
+```
+
+```{r}
+sims <- 800
+
+#Initialize variables to store simulation results
+	RubinSE<-RobinsWangSE<-Estimate<-AnalysisN<-NULL
+	output<-matrix(NA,sims,3)
+	colnames(output)<-c("Estimate","RW","Rubin")
+
+for (k in 1:sims){
+#Load relevant packages
+	set.seed(455)
+	#set.seed(2500+455+k)
+	require(mvtnorm)
+  
+#Fixed values
+	obs<-2000
+	ID<-rep(1:obs)
+  Xvar <- 1
+  Yvar <- 1
+	beta<-c(-1, 0.5)
+	Nimpute<-25 #Number of imputation
+
+  #Generate values
+	X<-rnorm(obs, mean = 0, sd = sqrt(Xvar))
+	Xmat<-cbind(1,X)
+	rownames(Xmat)<-ID
+	colnames(Xmat)<-c("Intercept","X")
+	
+	# y follow the bernoulli distribution 
+  mu <- expit(Xmat %*% beta)
+  Y <- rbinom(obs, 1, mu)
+							
+  #Original dataset
+	dat<-dat.original<-data.frame(ID, X, Y)
+	dat$Intercept<-1
+
+	
+	# randomly sample missing on x
+	missrate <- 0.1
+  miss <- with(dat, sample(ID, missrate * obs))
+  dat[miss, "X"] <- NA
+  dat.imputed<-dat
+  dat.imputed$Imputed<-ifelse(dat$ID %in% miss, 1, 0)
+#Fit linear regression model using complete observations
+  
+	mod<-glm(X~Y,data=dat,family="gaussian" ,y=FALSE,model=FALSE)
+	
+	#Function to impute values
+	ImputationFn<-function(mod,datty){
+	vars<-c("Intercept",all.vars(formula(mod)[-2]))
+	newdatmat<-datty[,vars]
+		#Account for parameter uncertainty
+		#Re-draw from a multivariate normal distribution with mean and variance 
+		 #as the parameter estimates and cov matrix from the regression model. 
+
+			desmatrix<-rmvnorm(1, mean=mod$coefficients, sigma=vcov(mod))	
+			linpred<-as.vector(desmatrix%*%t(newdatmat))
+        
+		if (mod$family[1]=="binomial"){return(linpred)}
+		if (mod$family[1]=="gaussian"){
+		#Account for random noise
+		#Randomly sample from the residuals
+			resid.y<-mod$residuals
+			imputed.values<-linpred + as.numeric(sample(resid.y,length(linpred),replace=TRUE))
+		}
+		return(imputed.values)
+	}
+	
+	#Replace missing balues with imputed value		
+	imputed.X<-ImputationFn(mod,datty=dat.imputed)
+	dat.imputed$X[miss]<-imputed.X[miss]
+	
+	imputemod.vars<-c("Intercept",all.vars(formula(mod)[-2]))
+	imputedvar <- dat.imputed[, rownames(attributes(mod$terms)$factors)[1]]
+	predicted.values<-predict(mod,newdata=dat.imputed,returnvar="linpred")
+	S_u<-dat.imputed[,imputemod.vars]*(imputedvar-exp(predicted.values)/(1+exp(predicted.values)))
+	modelvarcount<-length(imputemod.vars)
+	class(imputedvar)
+#Imputer need to supply two datasets based on the score function of the imputation model
+
+#Function to evaluate score function when imputation model is either linear or logistic regression model
+S_u_function<-function(datty,mod.impute,imputedvar){
+	imputemod.vars<-c("Intercept",all.vars(formula(mod.impute)[-2]))
+
+if (mod.impute$family[1]=="gaussian"){
+	sigma.est<-var(mod.impute$residuals)
+	predicted.values<-predict(mod.impute,newdata=datty)
+	S_u_1<-(imputedvar-predicted.values)*datty[,imputemod.vars]/sigma.est
+	S_sigma_1<-0.5*(-1/sigma.est+ (imputedvar-predicted.values)^2/sigma.est^2)
+	S_u<-cbind(S_u_1,S_sigma_1)		
+	modelvarcount<-length(imputemod.vars)+1	#Account for sigma
+}
+	
+if (mod.impute$family[1]=="binomial"){
+	#predicted.values is actually predicted LP
+	predicted.values<-predict(mod.impute,newdata=datty,returnvar="linpred")
+   	S_u<-datty[,imputemod.vars]*(imputedvar-exp(predicted.values)/(1+exp(predicted.values)))
+   	modelvarcount<-length(imputemod.vars)
+}
+return(S_u)
+}
+
+#Function to evaluate derivative of score function when imputation model is either linear or logistic regression model
+S2_function<-function(datty,mod.impute,imputedvar){
+    imputemod.vars<-c("Intercept",all.vars(formula(mod.impute)[-2]))
+    impvar_n<-length(imputemod.vars)
+
+if (mod.impute$family[1]=="gaussian"){
+	sigma.est<-var(mod.impute$residuals)
+	predicted.values<-predict(mod.impute,newdata=datty)
+
+	S2_uu<-matrix(NA,nrow(datty),length(imputemod.vars))
+	S2_uu<-with(datty,(-1/sigma.est*t(datty[Imputed==0,c(imputemod.vars)])%*%
+		t(t(datty[Imputed==0,c(imputemod.vars)]))))
+	S2_usigma<-with(datty,(-1/sigma.est^2*t(datty[Imputed==0,c(imputemod.vars)])%*%(imputedvar-predicted.values)[Imputed==0]))
+	S2_sigmasigma<-sum(with(datty,ifelse(Imputed==1,0,1/(2*sigma.est^2)-(imputedvar-predicted.values)^2/sigma.est^3)))
+	S2_mod<-matrix(0,impvar_n+1,impvar_n+1)
+	S2_mod[1:impvar_n,1:impvar_n]<-S2_uu/dim(datty)[1]
+	S2_mod[1:impvar_n,impvar_n+1]<-S2_mod[impvar_n+1,1:impvar_n]<-apply(S2_usigma,1,mean)/dim(datty)[1]
+	S2_mod[impvar_n+1,impvar_n+1]<-S2_sigmasigma/dim(datty)[1]
+}	
+if (mod.impute$family[1]=="binomial"){
+	ImputeX<-datty[,imputemod.vars]
+	#predicted.values is actually predicted LP
+	predicted.values<-predict(mod.impute,newdata=datty,type="link")
+	S2_mod<-matrix(NA,ncol(ImputeX),ncol(ImputeX))
+	constant.term<-exp(predicted.values)/(1+exp(predicted.values))^2
+	for (matrow in 1:ncol(ImputeX)){
+		for (matcol in 1:ncol(ImputeX)){
+		temp<-(-1)*(ImputeX[,matrow])*((ImputeX[,matcol]))*constant.term
+		temp[datty$Imputed==1]<-0
+		S2_mod[matrow,matcol]<-sum(temp)/length(datty$ID)
+	  }
+	}
+}
+  return(S2_mod)
+}
+
+
+#Function that  calculates and outputs the required components from imputation model for RW calculation.
+#Updated from Example 1 to allow for joint imputation models
+RW_Components_Imputation_Fn<-function(){
+	
+	#Evaluate score function with respect to each of the parameters in the imputation models (including the variance!)
+	S_u_mod<-S_u_function(dat.imputed,mod,dat.imputed[,rownames(attributes(mod$terms)$factors)[1]])
+	S_u<-data.frame(S_u_mod)
+	
+	#Create matrices with indicators for whether observation corresponding to each row was missing or not
+	ImputedMat<-matrix(dat.imputed$Imputed==1,nrow(S_u),ncol(S_u),byrow=FALSE)
+	NOTImputedMat<-1-ImputedMat
+	
+	###############################################################
+	#Calculation of S_mis -- component from imputation model
+	#Output a dataset that is the evaluated score function for imputed observations
+	###############################################################
+	S_mis_imp<-S_u*ImputedMat
+
+	###############################################################
+	#Calculation of D -- component from imputation model
+	###############################################################
+	S_orig<-S_u*NOTImputedMat		
+	S2_mod<-S2_function(dat.imputed,mod,dat.imputed[,rownames(attributes(mod$terms)$factors)[1]])
+	n_S2mod<-ncol(S2_mod)
+	
+	S2<-matrix(0,n_S2mod,n_S2mod)
+	S2[1:n_S2mod,1:n_S2mod]<-S2_mod
+	
+	Dmat<-solve(S2)
+	d_t<-((-1)*Dmat)%*%t(S_orig)
+	d<-t(d_t)
+	
+	return(list(S_mis_imp,d))
+}
+RW_Components_Analysis_Fn<-function(){
+	analysis.predict<-predict(mod.analysis,type="response")
+  
+	###############################################################
+	#Calculation of u
+	#Evaluate the estimating equation for each observation
+	###############################################################
+	U_imp_pre<-dat.analysis[,analysis.vars]*matrix((dat.analysis$Y-analysis.predict), dim(dat.analysis[, analysis.vars]))
+	aa<-cbind(dat.analysis$ID,U_imp_pre)
+	colnames(aa)<-c("ID",colnames(U_imp_pre))
+	bb<-merge(dat.imputed[,c("ID","Imputed")],aa,by="ID",all=T)
+	U_imp<-bb[,colnames(U_imp_pre)]
+	U_imp[is.na(U_imp)]<-0
+	
+	###############################################################
+	#Calculation of tau
+	#Take the derivative of the estimating equation and evaluate for each observation
+	###############################################################
+	tempdat<-dat.analysis[,analysis.vars]
+	#predicted.values is actually predicted LP
+	analysis.predLP<-predict(mod.analysis,newdata=tempdat,type="link")
+	tau_imp<-matrix(NA,ncol(tempdat),ncol(tempdat))
+	rownames(tau_imp)<-colnames(tau_imp)<-colnames(tempdat)
+	constant.term<-exp(analysis.predLP)/(1+exp(analysis.predLP))^2
+	for (matrow in 1:ncol(tempdat)){
+		for (matcol in 1:ncol(tempdat)){
+		#WTD:  Switch to matrix notation?
+		temp<-(-1)*(tempdat[,matrow])*((tempdat[,matcol]))*constant.term
+		tau_imp[matrow,matcol]<-(-1)*sum(temp)
+	  }
+	}
+	return(list(U_imp,tau_imp))
+}
+
+#Initialize select variables
+    U_imp_sum<-0
+    kappa_sum<-0
+    tau_sum<-0
+    analysis.est<-analysis.se<-NULL
+
+for (p in 1:Nimpute){
+	#Replace missing values with imputed value		
+	dat.imputed<-dat
+	dat.imputed$Imputed<-ifelse(dat$ID %in% miss, 1, 0)
+	
+	imputed.X<-ImputationFn(mod,datty=dat.imputed)
+	dat.imputed$X[miss]<-imputed.X[miss]
+	
+	#Create analysis dataset based on inclusion criteria and perform logistic regression
+	dat.analysis<-dat.imputed
+	mod.analysis<-glm(Y~X,data=dat.analysis,family="binomial")	
+	analysis.vars<-names(mod.analysis$coef)
+	analysis.vars<-ifelse(analysis.vars=="(Intercept)","Intercept",analysis.vars)
+
+	#Capture estimates and corresponding SE from each imputation
+	analysis.est[p]<-mod.analysis$coef["X"]
+	analysis.se[p]<-sqrt(diag(vcov(mod.analysis))["X"])
+	
+	#Evaluate all four components for a given imputation
+	ImputationComponents<-RW_Components_Imputation_Fn()
+	AnalysisComponents<-RW_Components_Analysis_Fn()
+	S_mis_imp<-ImputationComponents[[1]]
+	d<-ImputationComponents[[2]] #Only need to calculate d once as it does not vary across imputations
+	U_imp<-AnalysisComponents[[1]]
+	U_imp[is.na(U_imp)]<-0	
+	tau_imp<-AnalysisComponents[[2]]
+	
+	#Create summations of certain components across imputations
+	U_imp_sum<-U_imp_sum + U_imp		
+	tau_sum<-tau_sum+tau_imp
+	
+	#Calculate kappa for a given imputation
+	kappa_imp <- t(U_imp)%*%t(t(S_mis_imp))
+	#Create summation for kappa across imputations
+	kappa_sum<-kappa_sum+kappa_imp
+}
+
+
+###############################################################
+#Combine components together to calculate Robins and Wang variance estimator
+###############################################################
+	u_bar<-U_imp_sum/Nimpute
+	u_bar<-t(t(u_bar))
+
+	omega<-(t(u_bar)%*%t(t(u_bar)))/(obs)
+	kappa<-t(t(kappa_sum/(obs*Nimpute)))
+
+	alpha<-(t(d)%*%d)/obs
+
+	delta<-omega + kappa%*%alpha%*%t(kappa) + 
+		(1/obs)*(kappa%*%t(d)%*%u_bar + t(kappa%*%t(d)%*%u_bar))
+	tau<-tau_sum/(Nimpute*obs)
+	GAMMA<-(1/obs)*t(t(solve(tau)))%*%delta%*%t(solve(tau)) 
+	
+	#Save SE estimates to calculate CIs!
+	RobinsWangSE[k]<-sqrt(diag(GAMMA)["X"])
+	RubinSE[k]<-sqrt(mean(analysis.se^2)+ (Nimpute+1)/Nimpute*var(analysis.est))			
+	
+	
+	#Other values to output
+	#Parameter Estimate
+	Estimate[k]<-mean(analysis.est)
+
+  output[k,]<-c(Estimate[k],RobinsWangSE[k],RubinSE[k])
+  
+}
+
+out <- colMeans(output)
+data <- data.frame(Estimate = rep(out[1], 2), SE = out[2:3], 
+                   lowerCI = c(out[1] - out[2:3]), upperCI = c(out[1] + out[2:3])) %>% 
+  mutate(widthCI = upperCI - lowerCI)
+round(data, digits = 3)
+```
+
